@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>GBA WebAssembly P2P & Save Manager</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: #0f0c1b; color: #e0d0ff; display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 15px; }
+    h1 { font-size: 20px; color: #a272ff; margin-bottom: 10px; text-shadow: 0 0 10px rgba(162,114,255,0.4); }
+    
+    .status-badge {
+      background: #1f1838; border: 1px solid #5d43a0; padding: 6px 14px;
+      border-radius: 20px; font-size: 12px; color: #00ffcc; margin-bottom: 15px;
+      font-weight: bold; text-align: center;
+    }
+
+    /* Panels */
+    .panel {
+      width: 100%; max-width: 480px; background: #19142b; border: 1px solid #3d2f66;
+      border-radius: 12px; padding: 12px 15px; margin-bottom: 12px; font-size: 13px;
+    }
+    .panel-title { color: #ff72a1; font-weight: bold; margin-bottom: 8px; font-size: 14px; }
+    .input-group { display: flex; gap: 8px; margin-top: 6px; }
+    input[type="text"] {
+      flex: 1; background: #0c0a14; border: 1px solid #4a387d; color: #fff;
+      padding: 8px 12px; border-radius: 6px; font-size: 14px; text-align: center;
+    }
+    button, .file-btn-label {
+      background: linear-gradient(135deg, #7c4dff, #512da8); color: #fff; border: none;
+      padding: 8px 14px; border-radius: 6px; font-weight: bold; cursor: pointer;
+      font-size: 12px; text-align: center; display: inline-block; user-select: none;
+    }
+    button:active, .file-btn-label:active { opacity: 0.8; }
+    
+    .save-controls { display: flex; gap: 8px; margin-top: 8px; }
+    .save-controls > * { flex: 1; }
+
+    /* Screen Container */
+    #emulator-container {
+      width: 100%; max-width: 480px; height: 320px; background: #000;
+      border-radius: 12px; overflow: hidden; border: 2px solid #4a3a75;
+      display: flex; justify-content: center; align-items: center; position: relative;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.7);
+    }
+    #game { width: 100%; height: 100%; }
+    
+    #file-select-overlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(15, 12, 27, 0.95); display: flex; flex-direction: column;
+      justify-content: center; align-items: center; padding: 20px; text-align: center;
+      z-index: 10;
+    }
+    input[type="file"] { display: none; }
+  </style>
+
+  <!-- PeerJS (WebRTC P2P ライブラリ) -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+</head>
+<body>
+
+  <h1>GBA P2P Link & Save Studio</h1>
+  <div class="status-badge" id="net-status">状態: 準備中...</div>
+
+  <!-- P2P Network Panel -->
+  <div class="panel">
+    <div class="panel-title">📱 スマホ2台 P2P通信接続</div>
+    <div id="host-section" style="display:flex; justify-content:space-between; align-items:center;">
+      <span>あなたの接続ID:</span>
+      <span style="font-size: 16px; font-weight: bold; color: #00ffcc;" id="my-peer-id">発行中...</span>
+    </div>
+    <div class="input-group">
+      <input type="text" id="target-peer-id" placeholder="相手のIDを入力">
+      <button id="btn-connect">接続 (Guest)</button>
+    </div>
+  </div>
+
+  <!-- Save Data Panel -->
+  <div class="panel">
+    <div class="panel-title">💾 セーブデータ (.sav) 管理</div>
+    <div class="save-controls">
+      <label class="file-btn-label" style="background:#2e7d32;">
+        .sav を選択
+        <input type="file" id="sav-file-input" accept=".sav">
+      </label>
+      <button id="btn-export-sav" style="background:#0277bd;">.sav を書き出す</button>
+    </div>
+    <div id="sav-status-text" style="font-size:11px; color:#aaa; margin-top:5px;">※ROM選択前に.savを選ぶと引継ぎ読み込みされます</div>
+  </div>
+
+  <!-- Emulator Canvas & Drop Overlay -->
+  <div id="emulator-container">
+    <div id="file-select-overlay">
+      <p style="margin-bottom: 15px; color: #d0c4ff; line-height: 1.5;">
+        通信を行う2台のスマホで<br><strong>同じ .gba ROM</strong> を選択してください
+      </p>
+      <label class="file-btn-label" style="padding:12px 24px; font-size:14px;">
+        .gba ROM ファイルを選択
+        <input type="file" id="rom-file-input" accept=".gba">
+      </label>
+    </div>
+    <div id="game"></div>
+  </div>
+
+  <script>
+    // --- State Variables ---
+    let selectedRomBlob = null;
+    let selectedSavBlob = null;
+    let peer = null;
+    let conn = null;
+    let isHost = false;
+
+    const statusEl = document.getElementById('net-status');
+    const myIdEl = document.getElementById('my-peer-id');
+    const btnConnect = document.getElementById('btn-connect');
+    const targetIdInput = document.getElementById('target-peer-id');
+    const savStatusText = document.getElementById('sav-status-text');
+
+    // --- 1. PeerJS P2P Networking ---
+    function initPeer() {
+      const randomId = 'gba-' + Math.floor(1000 + Math.random() * 9000);
+      peer = new Peer(randomId);
+
+      peer.on('open', (id) => {
+        myIdEl.innerText = id;
+        statusEl.innerText = '状態: ID準備完了。接続待ち';
+      });
+
+      peer.on('connection', (connection) => {
+        conn = connection;
+        isHost = true;
+        setupConnectionEvents();
+        statusEl.innerText = '状態: P2P直通完了 (Host / Player 1)';
+      });
+
+      peer.on('error', (err) => {
+        statusEl.innerText = 'エラー: ' + err.type;
+      });
+    }
+
+    btnConnect.addEventListener('click', () => {
+      const targetId = targetIdInput.value.trim();
+      if (!targetId) { alert('相手のIDを入力してください'); return; }
+      conn = peer.connect(targetId, { reliable: false }); // UDP低遅延モード
+      isHost = false;
+      setupConnectionEvents();
+      statusEl.innerText = '状態: 接続処理中...';
+    });
+
+    function setupConnectionEvents() {
+      conn.on('open', () => {
+        statusEl.innerText = `状態: P2P直結完了 (${isHost ? 'Player 1' : 'Player 2'})`;
+      });
+      conn.on('data', (data) => {
+        if (window.EJS_emulator && window.EJS_emulator.receiveSerial) {
+          window.EJS_emulator.receiveSerial(data);
+        }
+      });
+      conn.on('close', () => { statusEl.innerText = '状態: 通信が切断されました'; });
+    }
+
+    function sendGbaLinkData(byteData) {
+      if (conn && conn.open) { conn.send(byteData); }
+    }
+
+    // --- 2. Save Data & ROM Handling ---
+    document.getElementById('sav-file-input').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        selectedSavBlob = URL.createObjectURL(file);
+        savStatusText.innerText = `読み込み予約済: ${file.name}`;
+        savStatusText.style.color = '#00ffcc';
+      }
+    });
+
+    document.getElementById('rom-file-input').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        selectedRomBlob = URL.createObjectURL(file);
+        document.getElementById('file-select-overlay').style.display = 'none';
+        startEmulator();
+      }
+    });
+
+    // --- 3. EmulatorJS WebAssembly Core ---
+    function startEmulator() {
+      window.EJS_player = "#game";
+      window.EJS_core = "gba";
+      window.EJS_gameUrl = selectedRomBlob;
+      
+      // 事前に選択された .sav があれば適用
+      if (selectedSavBlob) {
+        window.EJS_saveUrl = selectedSavBlob;
+      }
+
+      window.EJS_pathtodata = "https://cdn.emulatorjs.org/stable/data/";
+      window.EJS_startOnLoaded = true;
+
+      // SIO通信イベントフック
+      window.EJS_onSerialSend = function(data) {
+        sendGbaLinkData(data);
+      };
+
+      const script = document.createElement('script');
+      script.src = "https://cdn.emulatorjs.org/stable/data/loader.js";
+      document.body.appendChild(script);
+    }
+
+    // --- 4. Export Current Save (.sav) ---
+    document.getElementById('btn-export-sav').addEventListener('click', () => {
+      if (window.EJS_emulator && window.EJS_emulator.gameManager) {
+        window.EJS_emulator.gameManager.getState((stateData) => {
+          const blob = new Blob([stateData], { type: 'application/octet-stream' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = 'game_save.sav';
+          a.click();
+        });
+      } else {
+        alert('ゲームが起動している状態で実行してください');
+      }
+    });
+
+    initPeer();
+  </script>
+</body>
+</html>
