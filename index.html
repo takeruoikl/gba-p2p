@@ -15,7 +15,6 @@
       font-weight: bold; text-align: center;
     }
 
-    /* Panels */
     .panel {
       width: 100%; max-width: 480px; background: #19142b; border: 1px solid #3d2f66;
       border-radius: 12px; padding: 12px 15px; margin-bottom: 12px; font-size: 13px;
@@ -36,7 +35,6 @@
     .save-controls { display: flex; gap: 8px; margin-top: 8px; }
     .save-controls > * { flex: 1; }
 
-    /* Screen Container */
     #emulator-container {
       width: 100%; max-width: 480px; height: 320px; background: #000;
       border-radius: 12px; overflow: hidden; border: 2px solid #4a3a75;
@@ -54,7 +52,7 @@
     input[type="file"] { display: none; }
   </style>
 
-  <!-- PeerJS (WebRTC P2P ライブラリ) -->
+  <!-- PeerJS -->
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
@@ -88,7 +86,7 @@
     <div id="sav-status-text" style="font-size:11px; color:#aaa; margin-top:5px;">※ROM選択前に.savを選ぶと引継ぎ読み込みされます</div>
   </div>
 
-  <!-- Emulator Canvas & Drop Overlay -->
+  <!-- Emulator Canvas -->
   <div id="emulator-container">
     <div id="file-select-overlay">
       <p style="margin-bottom: 15px; color: #d0c4ff; line-height: 1.5;">
@@ -103,7 +101,6 @@
   </div>
 
   <script>
-    // --- State Variables ---
     let selectedRomBlob = null;
     let selectedSavBlob = null;
     let peer = null;
@@ -116,10 +113,19 @@
     const targetIdInput = document.getElementById('target-peer-id');
     const savStatusText = document.getElementById('sav-status-text');
 
-    // --- 1. PeerJS P2P Networking ---
     function initPeer() {
-      const randomId = 'gba-' + Math.floor(1000 + Math.random() * 9000);
-      peer = new Peer(randomId);
+      const randomId = 'gba-' + Math.floor(10000 + Math.random() * 90000);
+      
+      // Google提供の公開STUNサーバーを指定してWebRTC接続率を強化
+      peer = new Peer(randomId, {
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+          ]
+        },
+        debug: 1
+      });
 
       peer.on('open', (id) => {
         myIdEl.innerText = id;
@@ -134,14 +140,19 @@
       });
 
       peer.on('error', (err) => {
-        statusEl.innerText = 'エラー: ' + err.type;
+        console.error("PeerJS Error:", err);
+        if (err.type === 'network') {
+          statusEl.innerText = 'エラー: ネットワーク接続失敗 (再読み込みしてください)';
+        } else {
+          statusEl.innerText = 'エラー: ' + err.type;
+        }
       });
     }
 
     btnConnect.addEventListener('click', () => {
       const targetId = targetIdInput.value.trim();
       if (!targetId) { alert('相手のIDを入力してください'); return; }
-      conn = peer.connect(targetId, { reliable: false }); // UDP低遅延モード
+      conn = peer.connect(targetId, { reliable: false });
       isHost = false;
       setupConnectionEvents();
       statusEl.innerText = '状態: 接続処理中...';
@@ -163,7 +174,6 @@
       if (conn && conn.open) { conn.send(byteData); }
     }
 
-    // --- 2. Save Data & ROM Handling ---
     document.getElementById('sav-file-input').addEventListener('change', (e) => {
       const file = e.target.files[0];
       if (file) {
@@ -182,13 +192,11 @@
       }
     });
 
-    // --- 3. EmulatorJS WebAssembly Core ---
     function startEmulator() {
       window.EJS_player = "#game";
       window.EJS_core = "gba";
       window.EJS_gameUrl = selectedRomBlob;
       
-      // 事前に選択された .sav があれば適用
       if (selectedSavBlob) {
         window.EJS_saveUrl = selectedSavBlob;
       }
@@ -196,7 +204,6 @@
       window.EJS_pathtodata = "https://cdn.emulatorjs.org/stable/data/";
       window.EJS_startOnLoaded = true;
 
-      // SIO通信イベントフック
       window.EJS_onSerialSend = function(data) {
         sendGbaLinkData(data);
       };
@@ -206,7 +213,6 @@
       document.body.appendChild(script);
     }
 
-    // --- 4. Export Current Save (.sav) ---
     document.getElementById('btn-export-sav').addEventListener('click', () => {
       if (window.EJS_emulator && window.EJS_emulator.gameManager) {
         window.EJS_emulator.gameManager.getState((stateData) => {
